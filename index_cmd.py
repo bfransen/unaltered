@@ -7,7 +7,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Iterable, List, Set
+from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from common import (
     COMMIT_EVERY,
@@ -106,6 +106,7 @@ def index_files(
     report_path: Path,
     ignore_deleted: bool = False,
     workers: int = DEFAULT_WORKERS,
+    progress_callback: Optional[Callable[[int, Dict[str, int]], None]] = None,
 ) -> Dict[str, object]:
     """Scan files, hash new or changed entries, and update the database."""
     stats = {
@@ -134,6 +135,10 @@ def index_files(
     total_processed = 0
     last_progress_log = 0
     db_entries_after = 0
+
+    def emit_progress() -> None:
+        if progress_callback:
+            progress_callback(total_processed, dict(stats))
 
     def log_progress() -> None:
         nonlocal last_progress_log
@@ -167,6 +172,7 @@ def index_files(
                     errors.append({"path": path_str, "error": str(exc)})
                     total_processed += 1
                     log_progress()
+                    emit_progress()
                     continue
 
                 size = file_stat.st_size
@@ -197,6 +203,7 @@ def index_files(
                         errors.append({"path": path_str, "error": str(exc)})
                         total_processed += 1
                         log_progress()
+                        emit_progress()
                         continue
 
                     if existing:
@@ -228,6 +235,7 @@ def index_files(
                 processed_since_commit += 1
                 total_processed += 1
                 log_progress()
+                emit_progress()
                 if processed_since_commit >= COMMIT_EVERY:
                     conn.commit()
                     processed_since_commit = 0
@@ -251,6 +259,7 @@ def index_files(
                 processed_since_commit += processed
                 total_processed += len(results)
                 log_progress()
+                emit_progress()
                 if processed_since_commit >= COMMIT_EVERY:
                     conn.commit()
                     processed_since_commit = 0
@@ -276,6 +285,7 @@ def index_files(
                     errors.append({"path": path_str, "error": str(exc)})
                     total_processed += 1
                     log_progress()
+                    emit_progress()
                     continue
 
                 size = file_stat.st_size
@@ -300,6 +310,7 @@ def index_files(
                     processed_since_commit += 1
                     total_processed += 1
                     log_progress()
+                    emit_progress()
                     if processed_since_commit >= COMMIT_EVERY:
                         conn.commit()
                         processed_since_commit = 0
@@ -375,4 +386,5 @@ def index_files(
         mode="index",
         details=details,
     )
+    emit_progress()
     return report

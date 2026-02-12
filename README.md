@@ -114,7 +114,11 @@ The UI includes separate **Index** and **Verify** tabs with fields for:
 - verbose logging
 - cross-root mode (verify only)
 
-Runs execute in the background so the window stays responsive, and log output plus a summary is shown in the lower panel.
+Runs execute in the background so the window stays responsive.
+
+Verify runs also render a folder tree that highlights differences (changed hash, added, deleted, moved-from, moved-to) and rolls those counts up to parent folders so you can quickly identify affected areas.
+
+A progress bar shows processed files and an estimate of how many files are left.
 
 ## Workflow
 

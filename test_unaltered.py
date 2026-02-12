@@ -231,10 +231,16 @@ def test_verify_files_handles_moved_files_by_hash(tmp_path: Path):
     stats = report["stats"]
     # File should be verified (found by hash)
     assert stats["verified"] == 1
+    # Path changed should be reported as moved
+    assert stats["moved"] == 1
     # Original path should NOT be marked as missing (because hash was verified)
     assert stats["missing"] == 0
     # New path should NOT be marked as untracked (because hash matched)
     assert stats["untracked"] == 0
+    # Move details should include old and new paths
+    assert len(report["moved"]) == 1
+    assert report["moved"][0]["stored_path"] == str(original_path)
+    assert report["moved"][0]["current_path"] == str(new_path)
 
 
 def test_verify_files_cross_root_backup(tmp_path: Path):
