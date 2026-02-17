@@ -94,6 +94,32 @@ python unaltered.py verify --root /path/to/photos --workers 4
 |--------|-------------|
 | `--cross-root` | Root is a different tree (e.g. backup). Verification is hash-only; "missing" = hashes in DB not found under root. |
 
+## Desktop UI
+
+If you prefer a graphical interface, run:
+
+```bash
+python unaltered_ui.py
+```
+
+The UI includes separate **Index** and **Verify** tabs with fields for:
+
+- root directory
+- database path
+- report path
+- exclude extensions
+- worker count
+- ignore-deleted flag
+- optional log file
+- verbose logging
+- cross-root mode (verify only)
+
+Runs execute in the background so the window stays responsive.
+
+Verify runs also render a folder tree that highlights differences (changed hash, added, deleted, moved-from, moved-to) and rolls those counts up to parent folders so you can quickly identify affected areas.
+
+A progress bar shows processed files and an estimate of how many files are left.
+
 ## Workflow
 
 1. **Initial index**: Run `index` on the directory you want to protect. This creates `integrity.db` and `report.json`.

@@ -7,7 +7,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable, Dict, List, Set
+from typing import Callable, Dict, List, Optional, Set
 
 from common import (
     DEFAULT_HASH_ALGO,
@@ -30,6 +30,7 @@ def _process_hash_result_verify(
     conn: sqlite3.Connection,
     stats: Dict[str, int],
     mismatched: List[Dict[str, object]],
+    moved: List[Dict[str, object]],
     untracked: List[Dict[str, object]],
     errors: List[Dict[str, object]],
     verified_hashes: Set[str],
@@ -113,6 +114,16 @@ def _process_hash_result_verify(
 
     stats["verified"] += 1
     if matched_by_hash and row["path"] != fi.path_str:
+        stats["moved"] += 1
+        moved.append(
+            {
+                "stored_path": row["path"],
+                "current_path": fi.path_str,
+                "size": fi.size,
+                "mtime_ns": fi.mtime_ns,
+                "hash": digest,
+            }
+        )
         logging.debug(f"File moved: {row['path']} -> {fi.path_str}")
 
 
@@ -124,12 +135,13 @@ def _verify_single_threaded(
     conn: sqlite3.Connection,
     stats: Dict[str, int],
     mismatched: List[Dict[str, object]],
+    moved: List[Dict[str, object]],
     untracked: List[Dict[str, object]],
     errors: List[Dict[str, object]],
     verified_hashes: Set[str],
     verified_paths: Set[str],
     total_processed_ref: List[int],
-    log_progress: Callable[[], None],
+    tick_progress: Callable[[], None],
 ) -> None:
     """Scan files under root and verify each one by hashing in the current thread."""
     for file_path in iter_files(root):
@@ -149,7 +161,7 @@ def _verify_single_threaded(
             logging.warning(f"Failed to stat {file_path}: {exc}")
             errors.append({"path": path_str, "error": str(exc)})
             total_processed_ref[0] += 1
-            log_progress()
+            tick_progress()
             continue
 
         if ignore_deleted and should_ignore_file(file_path, file_stat.st_size):
@@ -169,13 +181,14 @@ def _verify_single_threaded(
             conn,
             stats,
             mismatched,
+            moved,
             untracked,
             errors,
             verified_hashes,
             verified_paths,
         )
         total_processed_ref[0] += 1
-        log_progress()
+        tick_progress()
 
 
 def _verify_multi_threaded(
@@ -187,12 +200,13 @@ def _verify_multi_threaded(
     conn: sqlite3.Connection,
     stats: Dict[str, int],
     mismatched: List[Dict[str, object]],
+    moved: List[Dict[str, object]],
     untracked: List[Dict[str, object]],
     errors: List[Dict[str, object]],
     verified_hashes: Set[str],
     verified_paths: Set[str],
     total_processed_ref: List[int],
-    log_progress: Callable[[], None],
+    tick_progress: Callable[[], None],
 ) -> None:
     """Scan files under root and verify in batches using a thread pool."""
     logging.info(f"Using {workers} worker threads for hashing")
@@ -206,11 +220,11 @@ def _verify_multi_threaded(
             for future in as_completed(futures):
                 result = future.result()
                 _process_hash_result_verify(
-                    result, conn, stats, mismatched, untracked, errors,
+                    result, conn, stats, mismatched, moved, untracked, errors,
                     verified_hashes, verified_paths,
                 )
                 total_processed_ref[0] += 1
-                log_progress()
+                tick_progress()
         hash_batch.clear()
 
     for file_path in iter_files(root):
@@ -230,7 +244,7 @@ def _verify_multi_threaded(
             logging.warning(f"Failed to stat {file_path}: {exc}")
             errors.append({"path": path_str, "error": str(exc)})
             total_processed_ref[0] += 1
-            log_progress()
+            tick_progress()
             continue
 
         if ignore_deleted and should_ignore_file(file_path, file_stat.st_size):
@@ -258,6 +272,7 @@ def verify_files(
     cross_root: bool = False,
     ignore_deleted: bool = False,
     workers: int = DEFAULT_WORKERS,
+    progress_callback: Optional[Callable[[int, Dict[str, int]], None]] = None,
 ) -> Dict[str, object]:
     """Verify files by comparing stored hashes against current hashes.
 
@@ -268,6 +283,7 @@ def verify_files(
         "scanned": 0,
         "excluded": 0,
         "verified": 0,
+        "moved": 0,
         "mismatched": 0,
         "missing": 0,
         "untracked": 0,
@@ -275,6 +291,7 @@ def verify_files(
         "db_entries": 0,
     }
     mismatched: List[Dict[str, object]] = []
+    moved: List[Dict[str, object]] = []
     missing: List[Dict[str, object]] = []
     untracked: List[Dict[str, object]] = []
     errors: List[Dict[str, object]] = []
@@ -299,6 +316,11 @@ def verify_files(
             )
             last_progress_log[0] = n
 
+    def tick_progress() -> None:
+        log_progress()
+        if progress_callback:
+            progress_callback(total_processed_ref[0], dict(stats))
+
     try:
         stats["db_entries"] = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
         verified_hashes: Set[str] = set()
@@ -313,12 +335,13 @@ def verify_files(
                 conn=conn,
                 stats=stats,
                 mismatched=mismatched,
+                moved=moved,
                 untracked=untracked,
                 errors=errors,
                 verified_hashes=verified_hashes,
                 verified_paths=verified_paths,
                 total_processed_ref=total_processed_ref,
-                log_progress=log_progress,
+                tick_progress=tick_progress,
             )
         else:
             _verify_multi_threaded(
@@ -330,12 +353,13 @@ def verify_files(
                 conn=conn,
                 stats=stats,
                 mismatched=mismatched,
+                moved=moved,
                 untracked=untracked,
                 errors=errors,
                 verified_hashes=verified_hashes,
                 verified_paths=verified_paths,
                 total_processed_ref=total_processed_ref,
-                log_progress=log_progress,
+                tick_progress=tick_progress,
             )
 
         def _db_row_ignored(row: object) -> bool:
@@ -388,11 +412,12 @@ def verify_files(
     run_finished = int(time.time())
     logging.info(
         f"Completed: scanned={stats['scanned']}, verified={stats['verified']}, "
-        f"mismatched={stats['mismatched']}, missing={stats['missing']}, "
+        f"moved={stats['moved']}, mismatched={stats['mismatched']}, missing={stats['missing']}, "
         f"untracked={stats['untracked']}, errors={stats['errors']}"
     )
     details: Dict[str, object] = {
         "mismatched": mismatched,
+        "moved": moved,
         "missing": missing,
         "untracked": untracked,
         "errors": errors,
@@ -415,4 +440,6 @@ def verify_files(
         mode="verify",
         details=details,
     )
+    if progress_callback:
+        progress_callback(total_processed_ref[0], dict(stats))
     return report
