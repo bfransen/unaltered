@@ -1,2 +1,5 @@
+# Tests
 pytest==9.0.2
 
+# GUI (unaltered_ui.py) uses tkinter from the Python standard library;
+# no pip install needed. On some Linux distros install python3-tk if missing.
