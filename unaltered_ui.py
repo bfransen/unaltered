@@ -11,6 +11,7 @@ Features:
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import threading
@@ -98,8 +99,8 @@ class UnalteredUI:
         self.progress_total = 0
         self.progress_processed = 0
 
-        self.index_vars: dict[str, tk.Variable]
-        self.verify_vars: dict[str, tk.Variable]
+        self.common_vars: dict[str, tk.Variable]
+        self.verify_vars: dict[str, tk.Variable]  # verify-only (e.g. cross_root)
         self.output: scrolledtext.ScrolledText
         self.diff_tree: ttk.Treeview
         self.progress_bar: ttk.Progressbar
@@ -112,7 +113,12 @@ class UnalteredUI:
         container = ttk.Frame(self.root_window, padding=10)
         container.pack(fill=tk.BOTH, expand=True)
 
-        notebook = ttk.Notebook(container)
+        common_frame = ttk.LabelFrame(container, text="Common settings", padding=12)
+        common_frame.pack(fill=tk.X)
+
+        self.common_vars = self._build_common_form(common_frame)
+
+        notebook = ttk.Notebook(container, padding=(0, 8))
         notebook.pack(fill=tk.BOTH, expand=False)
 
         index_tab = ttk.Frame(notebook, padding=12)
@@ -120,8 +126,10 @@ class UnalteredUI:
         notebook.add(index_tab, text="Index")
         notebook.add(verify_tab, text="Verify")
 
-        self.index_vars = self._build_command_form(index_tab, mode="index")
-        self.verify_vars = self._build_command_form(verify_tab, mode="verify")
+        self._build_index_tab(index_tab)
+        self._build_verify_tab(verify_tab)
+
+        self._load_defaults()
 
         progress_frame = ttk.LabelFrame(container, text="Progress", padding=8)
         progress_frame.pack(fill=tk.X, pady=(10, 0))
@@ -187,23 +195,19 @@ class UnalteredUI:
             command=self._clear_output,
         ).pack(side=tk.RIGHT)
 
-    def _build_command_form(self, parent: ttk.Frame, mode: str) -> dict[str, tk.Variable]:
+    def _build_common_form(self, parent: ttk.Frame) -> dict[str, tk.Variable]:
+        """Build shared fields (root, db, report, etc.) used by both index and verify."""
         cwd = Path.cwd()
         vars_map: dict[str, tk.Variable] = {
             "root": tk.StringVar(value=str(cwd)),
             "db": tk.StringVar(value=str(cwd / "integrity.db")),
-            "report": tk.StringVar(
-                value=str(cwd / ("report.json" if mode == "index" else "verify.json"))
-            ),
+            "report": tk.StringVar(value=str(cwd / "report.json")),
             "exclude_ext": tk.StringVar(value=""),
             "ignore_deleted": tk.BooleanVar(value=False),
             "workers": tk.StringVar(value="1"),
             "log": tk.StringVar(value=""),
             "verbose": tk.BooleanVar(value=False),
         }
-
-        if mode == "verify":
-            vars_map["cross_root"] = tk.BooleanVar(value=False)
 
         row = 0
         self._add_labeled_entry(
@@ -269,14 +273,6 @@ class UnalteredUI:
         ).grid(row=row, column=1, sticky="w", pady=(4, 0))
         row += 1
 
-        if mode == "verify":
-            ttk.Checkbutton(
-                parent,
-                text="Cross-root verify (hash-only, root can differ from index root)",
-                variable=vars_map["cross_root"],
-            ).grid(row=row, column=1, sticky="w", pady=(4, 0))
-            row += 1
-
         self._add_labeled_entry(
             parent=parent,
             row=row,
@@ -299,17 +295,91 @@ class UnalteredUI:
         ).grid(row=row, column=1, sticky="w", pady=(4, 0))
         row += 1
 
-        run_btn_text = "Run index" if mode == "index" else "Run verify"
-        if mode == "index":
-            run_btn_cmd = lambda values=vars_map: self._start_run("index", values)
-        else:
-            run_btn_cmd = lambda values=vars_map: self._start_run("verify", values)
-        run_button = ttk.Button(parent, text=run_btn_text, command=run_btn_cmd)
-        run_button.grid(row=row, column=1, sticky="w", pady=(10, 0))
-        self.run_buttons.append(run_button)
+        ttk.Button(
+            parent,
+            text="Save as defaults",
+            command=self._save_defaults,
+        ).grid(row=row, column=1, sticky="w", pady=(10, 0))
 
         parent.columnconfigure(1, weight=1)
         return vars_map
+
+    @staticmethod
+    def _get_defaults_path() -> Path:
+        """Path to the config file where default form values are stored."""
+        return Path.home() / ".config" / "unaltered" / "defaults.json"
+
+    def _load_defaults(self) -> None:
+        """Load saved defaults from config file into the form, if it exists."""
+        path = self._get_defaults_path()
+        if not path.is_file():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        bool_keys = {"ignore_deleted", "verbose", "cross_root"}
+        for key, value in data.items():
+            if key in self.common_vars:
+                v = self.common_vars[key]
+                if key in bool_keys:
+                    if isinstance(value, bool):
+                        v.set(value)
+                else:
+                    if isinstance(value, str):
+                        v.set(value)
+            elif key in self.verify_vars:
+                v = self.verify_vars[key]
+                if key in bool_keys and isinstance(value, bool):
+                    v.set(value)
+
+    def _save_defaults(self) -> None:
+        """Save current form values to the config file as defaults."""
+        data: dict[str, str | bool] = {}
+        for key, v in self.common_vars.items():
+            val = v.get()
+            data[key] = val if isinstance(val, (str, bool)) else str(val)
+        for key, v in self.verify_vars.items():
+            val = v.get()
+            data[key] = val if isinstance(val, (str, bool)) else str(val)
+        path = self._get_defaults_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            self.status_var.set("Defaults saved.")
+        except OSError as e:
+            messagebox.showerror(
+                "Save failed",
+                f"Could not write defaults to {path}:\n{e}",
+            )
+
+    def _build_index_tab(self, parent: ttk.Frame) -> None:
+        """Index tab: only the Run button (common settings are above)."""
+        run_button = ttk.Button(
+            parent,
+            text="Run index",
+            command=lambda: self._start_run("index"),
+        )
+        run_button.pack(anchor="w")
+        self.run_buttons.append(run_button)
+
+    def _build_verify_tab(self, parent: ttk.Frame) -> None:
+        """Verify tab: cross-root option and Run button (common settings are above)."""
+        self.verify_vars = {"cross_root": tk.BooleanVar(value=False)}
+        ttk.Checkbutton(
+            parent,
+            text="Cross-root verify (hash-only, root can differ from index root)",
+            variable=self.verify_vars["cross_root"],
+        ).pack(anchor="w", pady=(0, 8))
+        run_button = ttk.Button(
+            parent,
+            text="Run verify",
+            command=lambda: self._start_run("verify"),
+        )
+        run_button.pack(anchor="w")
+        self.run_buttons.append(run_button)
 
     @staticmethod
     def _add_labeled_entry(
@@ -360,7 +430,7 @@ class UnalteredUI:
         if selected:
             target.set(selected)
 
-    def _start_run(self, mode: str, values: dict[str, tk.Variable]) -> None:
+    def _start_run(self, mode: str) -> None:
         if self.running:
             messagebox.showwarning(
                 "Run in progress",
@@ -368,11 +438,13 @@ class UnalteredUI:
             )
             return
 
-        run_config = self._collect_common_config(values)
+        run_config = self._collect_common_config(self.common_vars)
         if run_config is None:
             return
 
-        cross_root = bool(values["cross_root"].get()) if "cross_root" in values else False
+        cross_root = (
+            bool(self.verify_vars["cross_root"].get()) if mode == "verify" else False
+        )
 
         self._clear_output()
         self._append_output(f"Starting {mode} run...\n")
