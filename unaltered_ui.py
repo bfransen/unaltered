@@ -19,6 +19,7 @@ import time
 import traceback
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -309,6 +310,11 @@ class UnalteredUI:
         """Path to the config file where default form values are stored."""
         return Path.home() / ".config" / "unaltered" / "defaults.json"
 
+    @staticmethod
+    def _path_with_date_suffix(path: Path, timestamp: str) -> Path:
+        """Insert -YYYY_MMDD_HHMM before the file extension (e.g. output.log -> output-2026_0220_1123.log)."""
+        return path.parent / f"{path.stem}-{timestamp}{path.suffix}"
+
     def _load_defaults(self) -> None:
         """Load saved defaults from config file into the form, if it exists."""
         path = self._get_defaults_path()
@@ -506,12 +512,18 @@ class UnalteredUI:
             return None
 
         exclude_exts = parse_exclude_extensions([exclude_value]) if exclude_value else set()
+        report_path = Path(report_value).expanduser()
         log_path = Path(log_value).expanduser() if log_value else None
+
+        timestamp = datetime.now().strftime("%Y_%m%d_%H%M")
+        report_path = self._path_with_date_suffix(report_path, timestamp)
+        if log_path is not None:
+            log_path = self._path_with_date_suffix(log_path, timestamp)
 
         return RunConfig(
             root=root.resolve(),
             db_path=Path(db_value).expanduser(),
-            report_path=Path(report_value).expanduser(),
+            report_path=report_path,
             exclude_exts=exclude_exts,
             ignore_deleted=bool(values["ignore_deleted"].get()),
             workers=workers,
