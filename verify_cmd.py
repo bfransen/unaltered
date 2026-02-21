@@ -7,7 +7,8 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, DefaultDict
+from collections import defaultdict
 
 from common import (
     DEFAULT_HASH_ALGO,
@@ -35,6 +36,7 @@ def _process_hash_result_verify(
     errors: List[Dict[str, object]],
     verified_hashes: Set[str],
     verified_paths: Set[str],
+    hash_to_paths: DefaultDict[str, Set[str]],
 ) -> None:
     """Process a single hash result for verification."""
     fi = result.file_info
@@ -65,16 +67,19 @@ def _process_hash_result_verify(
                 row = candidate
                 matched_by_hash = True
                 verified_hashes.add(digest)
-                verified_paths.add(candidate["path"])
+                verified_paths.add(fi.path_str)
+                hash_to_paths[digest].add(fi.path_str)
                 break
         if not row:
             row = rows_by_hash[0]
             matched_by_hash = True
             verified_hashes.add(digest)
-            verified_paths.add(row["path"])
+            verified_paths.add(fi.path_str)
+            hash_to_paths[digest].add(fi.path_str)
     elif row_by_path:
         row = row_by_path
         verified_paths.add(fi.path_str)
+        hash_to_paths[digest].add(fi.path_str)
         if row_by_path["hash"] != digest:
             stats["mismatched"] += 1
             mismatched.append(
@@ -113,18 +118,7 @@ def _process_hash_result_verify(
         return
 
     stats["verified"] += 1
-    if matched_by_hash and row["path"] != fi.path_str:
-        stats["moved"] += 1
-        moved.append(
-            {
-                "stored_path": row["path"],
-                "current_path": fi.path_str,
-                "size": fi.size,
-                "mtime_ns": fi.mtime_ns,
-                "hash": digest,
-            }
-        )
-        logging.debug(f"File moved: {row['path']} -> {fi.path_str}")
+    # Move vs duplicate is decided in a post-scan pass using hash_to_paths
 
 
 def _verify_single_threaded(
@@ -140,6 +134,7 @@ def _verify_single_threaded(
     errors: List[Dict[str, object]],
     verified_hashes: Set[str],
     verified_paths: Set[str],
+    hash_to_paths: DefaultDict[str, Set[str]],
     total_processed_ref: List[int],
     tick_progress: Callable[[], None],
 ) -> None:
@@ -186,6 +181,7 @@ def _verify_single_threaded(
             errors,
             verified_hashes,
             verified_paths,
+            hash_to_paths,
         )
         total_processed_ref[0] += 1
         tick_progress()
@@ -205,6 +201,7 @@ def _verify_multi_threaded(
     errors: List[Dict[str, object]],
     verified_hashes: Set[str],
     verified_paths: Set[str],
+    hash_to_paths: DefaultDict[str, Set[str]],
     total_processed_ref: List[int],
     tick_progress: Callable[[], None],
 ) -> None:
@@ -221,7 +218,7 @@ def _verify_multi_threaded(
                 result = future.result()
                 _process_hash_result_verify(
                     result, conn, stats, mismatched, moved, untracked, errors,
-                    verified_hashes, verified_paths,
+                    verified_hashes, verified_paths, hash_to_paths,
                 )
                 total_processed_ref[0] += 1
                 tick_progress()
@@ -287,6 +284,7 @@ def verify_files(
         "mismatched": 0,
         "missing": 0,
         "untracked": 0,
+        "duplicates": 0,
         "errors": 0,
         "db_entries": 0,
     }
@@ -294,6 +292,7 @@ def verify_files(
     moved: List[Dict[str, object]] = []
     missing: List[Dict[str, object]] = []
     untracked: List[Dict[str, object]] = []
+    duplicates: List[Dict[str, object]] = []
     errors: List[Dict[str, object]] = []
 
     run_started = int(time.time())
@@ -325,6 +324,7 @@ def verify_files(
         stats["db_entries"] = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
         verified_hashes: Set[str] = set()
         verified_paths: Set[str] = set()
+        hash_to_paths: DefaultDict[str, Set[str]] = defaultdict(set)
 
         if workers <= 1:
             _verify_single_threaded(
@@ -340,6 +340,7 @@ def verify_files(
                 errors=errors,
                 verified_hashes=verified_hashes,
                 verified_paths=verified_paths,
+                hash_to_paths=hash_to_paths,
                 total_processed_ref=total_processed_ref,
                 tick_progress=tick_progress,
             )
@@ -358,6 +359,7 @@ def verify_files(
                 errors=errors,
                 verified_hashes=verified_hashes,
                 verified_paths=verified_paths,
+                hash_to_paths=hash_to_paths,
                 total_processed_ref=total_processed_ref,
                 tick_progress=tick_progress,
             )
@@ -370,6 +372,50 @@ def verify_files(
                 Path(r["path"]).name.startswith("._")
                 and r["size"] < 4500
             )
+
+        # Post-scan: distinguish moves (hash at exactly one path, different from DB) from duplicates (hash at multiple paths)
+        if not cross_root:
+            for row in conn.execute("SELECT path, hash, size FROM files"):
+                if _db_row_ignored(row):
+                    continue
+                record_path = Path(row["path"])
+                if not is_under_root(record_path, root):
+                    continue
+                if record_path.suffix.lower() in exclude_exts:
+                    continue
+                record_str = str(record_path)
+                if record_str in excluded_paths:
+                    continue
+                if record_str in verified_paths:
+                    continue
+                if row["hash"] not in verified_hashes:
+                    continue
+                current_paths = hash_to_paths.get(row["hash"], set())
+                if len(current_paths) == 1:
+                    (current_path,) = current_paths
+                    if current_path != record_str:
+                        stats["moved"] += 1
+                        moved.append(
+                            {
+                                "stored_path": record_str,
+                                "current_path": current_path,
+                                "size": row["size"],
+                                "hash": row["hash"],
+                            }
+                        )
+                        logging.debug(f"File moved: {record_str} -> {current_path}")
+
+            for digest, paths in hash_to_paths.items():
+                if len(paths) <= 1:
+                    continue
+                size_row = conn.execute(
+                    "SELECT size FROM files WHERE hash = ? LIMIT 1", (digest,)
+                ).fetchone()
+                size = size_row["size"] if size_row else None
+                stats["duplicates"] += 1
+                duplicates.append(
+                    {"hash": digest, "paths": sorted(paths), "size": size}
+                )
 
         if cross_root:
             reported_missing_hashes: Set[str] = set()
@@ -413,13 +459,14 @@ def verify_files(
     logging.info(
         f"Completed: scanned={stats['scanned']}, verified={stats['verified']}, "
         f"moved={stats['moved']}, mismatched={stats['mismatched']}, missing={stats['missing']}, "
-        f"untracked={stats['untracked']}, errors={stats['errors']}"
+        f"untracked={stats['untracked']}, duplicates={stats['duplicates']}, errors={stats['errors']}"
     )
     details: Dict[str, object] = {
         "mismatched": mismatched,
         "moved": moved,
         "missing": missing,
         "untracked": untracked,
+        "duplicates": duplicates,
         "errors": errors,
     }
     if cross_root:
