@@ -281,6 +281,90 @@ def test_verify_files_reports_duplicates_not_moved_when_same_hash_at_multiple_pa
     assert set(dup[0]["paths"]) == {str(path_a), str(path_b)}
 
 
+def test_verify_files_reports_all_file_operations_in_single_run(tmp_path: Path):
+    """One verify run should capture move, duplicate, delete, add, and modify."""
+    root = tmp_path / "root"
+    db_path = tmp_path / "integrity.db"
+    report_path = tmp_path / "report.json"
+
+    moved_from = root / "album" / "move_me.txt"
+    duplicate_source = root / "album" / "duplicate_source.txt"
+    deleted_path = root / "album" / "delete_me.txt"
+    modified_path = root / "album" / "modify_me.txt"
+    stable_path = root / "album" / "stable.txt"
+
+    _write_file(moved_from, b"move-content")
+    _write_file(duplicate_source, b"duplicate-content")
+    _write_file(deleted_path, b"delete-content")
+    _write_file(modified_path, b"modify-before")
+    _write_file(stable_path, b"stable-content")
+
+    index_files(
+        root=root,
+        db_path=db_path,
+        exclude_exts=set(),
+        report_path=report_path,
+    )
+
+    moved_to = root / "archive" / "move_me.txt"
+    moved_to.parent.mkdir(parents=True, exist_ok=True)
+    moved_from.rename(moved_to)
+
+    duplicate_copy = root / "album" / "duplicate_copy.txt"
+    _write_file(duplicate_copy, duplicate_source.read_bytes())
+
+    deleted_path.unlink()
+    _write_file(modified_path, b"modify-after")
+
+    added_path = root / "album" / "added.txt"
+    _write_file(added_path, b"added-content")
+
+    report = verify_files(
+        root=root,
+        db_path=db_path,
+        exclude_exts=set(),
+        report_path=report_path,
+    )
+
+    stats = report["stats"]
+    assert stats["scanned"] == 6
+    assert stats["verified"] == 4
+    assert stats["moved"] == 1
+    assert stats["duplicates"] == 1
+    assert stats["missing"] == 1
+    assert stats["mismatched"] == 1
+    assert stats["untracked"] == 1
+    assert stats["errors"] == 0
+
+    assert len(report["moved"]) == 1
+    assert report["moved"][0]["stored_path"] == str(moved_from)
+    assert report["moved"][0]["current_path"] == str(moved_to)
+
+    assert len(report["duplicates"]) == 1
+    assert report["duplicates"][0]["hash"] == hashlib.sha256(
+        b"duplicate-content"
+    ).hexdigest()
+    assert set(report["duplicates"][0]["paths"]) == {
+        str(duplicate_source),
+        str(duplicate_copy),
+    }
+
+    assert len(report["missing"]) == 1
+    assert report["missing"][0]["path"] == str(deleted_path)
+
+    assert len(report["mismatched"]) == 1
+    assert report["mismatched"][0]["path"] == str(modified_path)
+    assert report["mismatched"][0]["expected_hash"] == hashlib.sha256(
+        b"modify-before"
+    ).hexdigest()
+    assert report["mismatched"][0]["actual_hash"] == hashlib.sha256(
+        b"modify-after"
+    ).hexdigest()
+
+    assert len(report["untracked"]) == 1
+    assert report["untracked"][0]["path"] == str(added_path)
+
+
 def test_verify_files_cross_root_backup(tmp_path: Path):
     """Test --cross-root: index source, verify backup (different root)."""
     source = tmp_path / "source"
