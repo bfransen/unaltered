@@ -243,6 +243,44 @@ def test_verify_files_handles_moved_files_by_hash(tmp_path: Path):
     assert report["moved"][0]["current_path"] == str(new_path)
 
 
+def test_verify_files_reports_duplicates_not_moved_when_same_hash_at_multiple_paths(
+    tmp_path: Path,
+):
+    """When the same file (same hash) exists at multiple paths, report duplicates, not moves."""
+    root = tmp_path / "root"
+    db_path = tmp_path / "integrity.db"
+    report_path = tmp_path / "report.json"
+
+    content = b"same content"
+    path_a = root / "folder_a" / "photo.jpg"
+    path_b = root / "folder_b" / "photo.jpg"
+    _write_file(path_a, content)
+    _write_file(path_b, content)
+
+    index_files(
+        root=root,
+        db_path=db_path,
+        exclude_exts=set(),
+        report_path=report_path,
+    )
+
+    report = verify_files(
+        root=root,
+        db_path=db_path,
+        exclude_exts=set(),
+        report_path=report_path,
+    )
+
+    stats = report["stats"]
+    assert stats["verified"] == 2
+    assert stats["duplicates"] == 1
+    assert stats["moved"] == 0
+    dup = report["duplicates"]
+    assert len(dup) == 1
+    assert dup[0]["hash"] == hashlib.sha256(content).hexdigest()
+    assert set(dup[0]["paths"]) == {str(path_a), str(path_b)}
+
+
 def test_verify_files_cross_root_backup(tmp_path: Path):
     """Test --cross-root: index source, verify backup (different root)."""
     source = tmp_path / "source"

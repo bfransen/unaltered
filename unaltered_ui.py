@@ -75,13 +75,14 @@ class QueueLogHandler(logging.Handler):
 class UnalteredUI:
     """Tkinter-based UI for indexing and verification runs."""
 
-    STATUS_ORDER = ("changed", "deleted", "added", "moved_from", "moved_to")
+    STATUS_ORDER = ("changed", "deleted", "added", "moved_from", "moved_to", "duplicate")
     STATUS_LABELS = {
         "changed": "CHANGED",
         "deleted": "DELETED",
         "added": "ADDED",
         "moved_from": "MOVED_FROM",
         "moved_to": "MOVED_TO",
+        "duplicate": "DUPLICATE",
     }
     STATUS_SUMMARY_LABELS = {
         "changed": "chg",
@@ -89,6 +90,7 @@ class UnalteredUI:
         "added": "add",
         "moved_from": "mv-from",
         "moved_to": "mv-to",
+        "duplicate": "dup",
     }
 
     def __init__(self, root_window: tk.Tk) -> None:
@@ -727,6 +729,7 @@ class UnalteredUI:
                 or stats.get("missing", 0)
                 or stats.get("untracked", 0)
                 or stats.get("moved", 0)
+                or stats.get("duplicates", 0)
                 or stats.get("errors", 0)
             )
             self.status_var.set(
@@ -894,6 +897,18 @@ class UnalteredUI:
                     detail = f"<- {stored_path}" if stored_path else ""
                     add_record("moved_to", current_path, detail)
 
+        duplicates = report.get("duplicates", [])
+        if isinstance(duplicates, list):
+            for item in duplicates:
+                if not isinstance(item, dict):
+                    continue
+                paths = item.get("paths") or []
+                hash_preview = (item.get("hash") or "")[:12]
+                n = len(paths)
+                detail = f"hash {hash_preview}… ({n} copies)"
+                for path in paths:
+                    add_record("duplicate", str(path).strip(), detail)
+
         deduped: list[tuple[str, str, str]] = []
         seen: set[tuple[str, str, str]] = set()
         for record in records:
@@ -936,6 +951,7 @@ class UnalteredUI:
                     f"  mismatched: {stats.get('mismatched', 0)}",
                     f"  missing: {stats.get('missing', 0)}",
                     f"  untracked: {stats.get('untracked', 0)}",
+                    f"  duplicates: {stats.get('duplicates', 0)}",
                 ]
             )
         lines.append("")
