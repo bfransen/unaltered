@@ -26,6 +26,13 @@ from typing import Callable, Optional
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+# Optional: logo in UI (PIL/Pillow only needed for JPEG)
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = None
+    ImageTk = None
+
 from common import (
     iter_files,
     parse_exclude_extensions,
@@ -105,6 +112,7 @@ class UnalteredUI:
         self.output: scrolledtext.ScrolledText
         self.diff_tree: ttk.Treeview
         self.progress_bar: ttk.Progressbar
+        self._logo_photo = None  # keep reference so image is not garbage-collected
 
         self._build_ui()
         self.root_window.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -113,6 +121,20 @@ class UnalteredUI:
     def _build_ui(self) -> None:
         container = ttk.Frame(self.root_window, padding=10)
         container.pack(fill=tk.BOTH, expand=True)
+
+        # Small logo at top-left (optional; requires Pillow if logo is JPEG)
+        logo_path = Path(__file__).resolve().parent / "unaltered_logo.jpg"
+        if Image is not None and ImageTk is not None and logo_path.is_file():
+            try:
+                img = Image.open(logo_path)
+                h = 36
+                w = max(1, int(img.width * (h / img.height)))
+                img = img.resize((w, h), getattr(Image, "Resampling", Image).LANCZOS)
+                self._logo_photo = ImageTk.PhotoImage(img)
+                logo_label = ttk.Label(container, image=self._logo_photo)
+                logo_label.pack(anchor="w", pady=(0, 8))
+            except Exception:
+                pass
 
         common_frame = ttk.LabelFrame(container, text="Common settings", padding=12)
         common_frame.pack(fill=tk.X)
