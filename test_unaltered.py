@@ -287,17 +287,44 @@ def test_verify_files_reports_all_file_operations_in_single_run(tmp_path: Path):
     db_path = tmp_path / "integrity.db"
     report_path = tmp_path / "report.json"
 
-    moved_from = root / "album" / "move_me.txt"
-    duplicate_source = root / "album" / "duplicate_source.txt"
-    deleted_path = root / "album" / "delete_me.txt"
-    modified_path = root / "album" / "modify_me.txt"
-    stable_path = root / "album" / "stable.txt"
+    moved_count = 2
+    duplicate_count = 3
+    deleted_count = 4
+    modified_count = 5
+    added_count = 6
+    stable_count = 2
 
-    _write_file(moved_from, b"move-content")
-    _write_file(duplicate_source, b"duplicate-content")
-    _write_file(deleted_path, b"delete-content")
-    _write_file(modified_path, b"modify-before")
-    _write_file(stable_path, b"stable-content")
+    moved_from_paths = [
+        root / "tracked" / "moved" / f"move_{idx}.txt"
+        for idx in range(moved_count)
+    ]
+    duplicate_source_paths = [
+        root / "tracked" / "duplicates" / f"source_{idx}.txt"
+        for idx in range(duplicate_count)
+    ]
+    deleted_paths = [
+        root / "tracked" / "deleted" / f"delete_{idx}.txt"
+        for idx in range(deleted_count)
+    ]
+    modified_paths = [
+        root / "tracked" / "modified" / f"modify_{idx}.txt"
+        for idx in range(modified_count)
+    ]
+    stable_paths = [
+        root / "tracked" / "stable" / f"stable_{idx}.txt"
+        for idx in range(stable_count)
+    ]
+
+    for idx, path in enumerate(moved_from_paths):
+        _write_file(path, f"move-before-{idx}".encode("utf-8"))
+    for idx, path in enumerate(duplicate_source_paths):
+        _write_file(path, f"duplicate-content-{idx}".encode("utf-8"))
+    for idx, path in enumerate(deleted_paths):
+        _write_file(path, f"delete-content-{idx}".encode("utf-8"))
+    for idx, path in enumerate(modified_paths):
+        _write_file(path, f"modify-before-{idx}".encode("utf-8"))
+    for idx, path in enumerate(stable_paths):
+        _write_file(path, f"stable-content-{idx}".encode("utf-8"))
 
     index_files(
         root=root,
@@ -306,18 +333,34 @@ def test_verify_files_reports_all_file_operations_in_single_run(tmp_path: Path):
         report_path=report_path,
     )
 
-    moved_to = root / "archive" / "move_me.txt"
-    moved_to.parent.mkdir(parents=True, exist_ok=True)
-    moved_from.rename(moved_to)
+    moved_to_paths = []
+    for idx, source_path in enumerate(moved_from_paths):
+        target_path = root / "current" / "moved" / f"move_{idx}.txt"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.rename(target_path)
+        moved_to_paths.append(target_path)
 
-    duplicate_copy = root / "album" / "duplicate_copy.txt"
-    _write_file(duplicate_copy, duplicate_source.read_bytes())
+    duplicate_copy_paths = []
+    for idx, source_path in enumerate(duplicate_source_paths):
+        copy_path = root / "current" / "duplicates" / f"copy_{idx}.txt"
+        _write_file(copy_path, source_path.read_bytes())
+        duplicate_copy_paths.append(copy_path)
 
-    deleted_path.unlink()
-    _write_file(modified_path, b"modify-after")
+    for path in deleted_paths:
+        path.unlink()
 
-    added_path = root / "album" / "added.txt"
-    _write_file(added_path, b"added-content")
+    expected_mismatched_hashes = {}
+    for idx, path in enumerate(modified_paths):
+        before_hash = hashlib.sha256(f"modify-before-{idx}".encode("utf-8")).hexdigest()
+        after_hash = hashlib.sha256(f"modify-after-{idx}".encode("utf-8")).hexdigest()
+        expected_mismatched_hashes[str(path)] = (before_hash, after_hash)
+        _write_file(path, f"modify-after-{idx}".encode("utf-8"))
+
+    added_paths = []
+    for idx in range(added_count):
+        added_path = root / "current" / "added" / f"added_{idx}.txt"
+        _write_file(added_path, f"added-content-{idx}".encode("utf-8"))
+        added_paths.append(added_path)
 
     report = verify_files(
         root=root,
@@ -327,42 +370,55 @@ def test_verify_files_reports_all_file_operations_in_single_run(tmp_path: Path):
     )
 
     stats = report["stats"]
-    assert stats["scanned"] == 6
-    assert stats["verified"] == 4
-    assert stats["moved"] == 1
-    assert stats["duplicates"] == 1
-    assert stats["missing"] == 1
-    assert stats["mismatched"] == 1
-    assert stats["untracked"] == 1
+    expected_verified = moved_count + (duplicate_count * 2) + stable_count
+    expected_scanned = expected_verified + modified_count + added_count
+    assert stats["scanned"] == expected_scanned
+    assert stats["verified"] == expected_verified
+    assert stats["moved"] == moved_count
+    assert stats["duplicates"] == duplicate_count
+    assert stats["missing"] == deleted_count
+    assert stats["mismatched"] == modified_count
+    assert stats["untracked"] == added_count
     assert stats["errors"] == 0
 
-    assert len(report["moved"]) == 1
-    assert report["moved"][0]["stored_path"] == str(moved_from)
-    assert report["moved"][0]["current_path"] == str(moved_to)
+    expected_moves = {
+        str(source): str(target)
+        for source, target in zip(moved_from_paths, moved_to_paths)
+    }
+    actual_moves = {
+        item["stored_path"]: item["current_path"] for item in report["moved"]
+    }
+    assert actual_moves == expected_moves
 
-    assert len(report["duplicates"]) == 1
-    assert report["duplicates"][0]["hash"] == hashlib.sha256(
-        b"duplicate-content"
-    ).hexdigest()
-    assert set(report["duplicates"][0]["paths"]) == {
-        str(duplicate_source),
-        str(duplicate_copy),
+    expected_duplicate_hashes = {
+        hashlib.sha256(f"duplicate-content-{idx}".encode("utf-8")).hexdigest()
+        for idx in range(duplicate_count)
+    }
+    actual_duplicate_hashes = {item["hash"] for item in report["duplicates"]}
+    assert actual_duplicate_hashes == expected_duplicate_hashes
+
+    expected_duplicate_paths = {
+        frozenset({str(source), str(copy_path)})
+        for source, copy_path in zip(duplicate_source_paths, duplicate_copy_paths)
+    }
+    actual_duplicate_paths = {
+        frozenset(item["paths"]) for item in report["duplicates"]
+    }
+    assert actual_duplicate_paths == expected_duplicate_paths
+
+    assert {item["path"] for item in report["missing"]} == {
+        str(path) for path in deleted_paths
     }
 
-    assert len(report["missing"]) == 1
-    assert report["missing"][0]["path"] == str(deleted_path)
+    actual_mismatched_hashes = {
+        item["path"]: (item["expected_hash"], item["actual_hash"])
+        for item in report["mismatched"]
+    }
+    assert actual_mismatched_hashes == expected_mismatched_hashes
 
-    assert len(report["mismatched"]) == 1
-    assert report["mismatched"][0]["path"] == str(modified_path)
-    assert report["mismatched"][0]["expected_hash"] == hashlib.sha256(
-        b"modify-before"
-    ).hexdigest()
-    assert report["mismatched"][0]["actual_hash"] == hashlib.sha256(
-        b"modify-after"
-    ).hexdigest()
-
-    assert len(report["untracked"]) == 1
-    assert report["untracked"][0]["path"] == str(added_path)
+    assert {item["path"] for item in report["untracked"]} == {
+        str(path) for path in added_paths
+    }
 
 
 def test_verify_files_cross_root_backup(tmp_path: Path):
