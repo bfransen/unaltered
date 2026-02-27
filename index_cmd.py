@@ -21,6 +21,7 @@ from common import (
     connect_database,
     compute_hash,
     compute_hash_task,
+    is_under_root,
     iter_files,
     should_ignore_file,
 )
@@ -119,6 +120,7 @@ def index_files(
         "hashed_updated": 0,
         "unchanged": 0,
         "errors": 0,
+        "pruned": 0,
     }
     added: List[Dict[str, object]] = []
     updated: List[Dict[str, object]] = []
@@ -135,6 +137,7 @@ def index_files(
     total_processed = 0
     last_progress_log = 0
     db_entries_after = 0
+    seen_paths: Set[str] = set()
 
     def emit_progress() -> None:
         if progress_callback:
@@ -193,6 +196,7 @@ def index_files(
                         "UPDATE files SET last_seen = ? WHERE path = ?",
                         (run_started, path_str),
                     )
+                    seen_paths.add(path_str)
                     stats["unchanged"] += 1
                 else:
                     try:
@@ -231,6 +235,7 @@ def index_files(
                     _upsert_file_record(
                         conn, path_str, filename, size, mtime_ns, digest, run_started
                     )
+                    seen_paths.add(path_str)
 
                 processed_since_commit += 1
                 total_processed += 1
@@ -256,6 +261,9 @@ def index_files(
                 processed = _process_hash_results_index(
                     results, conn, run_started, stats, added, updated, errors
                 )
+                for result in results:
+                    if not result.error:
+                        seen_paths.add(result.file_info.path_str)
                 processed_since_commit += processed
                 total_processed += len(results)
                 log_progress()
@@ -306,6 +314,7 @@ def index_files(
                         "UPDATE files SET last_seen = ? WHERE path = ?",
                         (run_started, path_str),
                     )
+                    seen_paths.add(path_str)
                     stats["unchanged"] += 1
                     processed_since_commit += 1
                     total_processed += 1
@@ -330,6 +339,23 @@ def index_files(
             flush_batch()
             if processed_since_commit:
                 conn.commit()
+
+        # Prune: remove DB rows under root that were not seen this run (moved or deleted)
+        for row in conn.execute("SELECT path FROM files"):
+            path_str = row["path"]
+            if path_str in seen_paths:
+                continue
+            path = Path(path_str)
+            if (
+                is_under_root(path, root)
+                and path.suffix.lower() not in exclude_exts
+                and path_str not in excluded_paths
+            ):
+                conn.execute("DELETE FROM files WHERE path = ?", (path_str,))
+                stats["pruned"] += 1
+        if stats["pruned"]:
+            conn.commit()
+
         db_entries_after = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
     finally:
         conn.close()
@@ -340,6 +366,7 @@ def index_files(
         "total_files_walked": stats["scanned"] + stats["excluded"],
         "already_indexed_unchanged": stats["unchanged"],
         "hashed_this_run": stats["hashed_new"] + stats["hashed_updated"],
+        "pruned": stats["pruned"],
         "excluded_breakdown": {
             "by_extension": stats["excluded_by_extension"],
             "ignore_deleted": stats["excluded_ignore_deleted"],
@@ -351,12 +378,13 @@ def index_files(
 
     logging.info(
         "Index summary: %d files walked | "
-        "already indexed (unchanged): %d | hashed this run: %d | "
+        "already indexed (unchanged): %d | hashed this run: %d | pruned: %d | "
         "excluded (by ext: %d, ._* <4KB: %d, path: %d) | errors: %d | DB total: %d"
         % (
             summary["total_files_walked"],
             summary["already_indexed_unchanged"],
             summary["hashed_this_run"],
+            stats["pruned"],
             stats["excluded_by_extension"],
             stats["excluded_ignore_deleted"],
             stats["excluded_by_path"],

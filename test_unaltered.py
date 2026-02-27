@@ -243,6 +243,36 @@ def test_verify_files_handles_moved_files_by_hash(tmp_path: Path):
     assert report["moved"][0]["current_path"] == str(new_path)
 
 
+def test_index_prunes_moved_paths_so_verify_no_longer_reports_moved(tmp_path: Path):
+    """Re-indexing after a move prunes the old path; verify then reports 0 moved."""
+    root = tmp_path / "root"
+    db_path = tmp_path / "integrity.db"
+    report_path = tmp_path / "report.json"
+
+    original_path = root / "old_folder" / "photo.jpg"
+    _write_file(original_path, b"photo content")
+    index_files(root=root, db_path=db_path, exclude_exts=set(), report_path=report_path)
+
+    new_path = root / "new_folder" / "photo.jpg"
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    new_path.write_bytes(original_path.read_bytes())
+    original_path.unlink()
+    original_path.parent.rmdir()
+
+    # First verify: should report moved
+    report1 = verify_files(root=root, db_path=db_path, exclude_exts=set(), report_path=report_path)
+    assert report1["stats"]["moved"] == 1
+
+    # Re-index: new path is seen, old path is pruned
+    index_report = index_files(root=root, db_path=db_path, exclude_exts=set(), report_path=report_path)
+    assert index_report["stats"]["pruned"] == 1
+
+    # Second verify: DB now only has new path, so no move
+    report2 = verify_files(root=root, db_path=db_path, exclude_exts=set(), report_path=report_path)
+    assert report2["stats"]["moved"] == 0
+    assert report2["stats"]["verified"] == 1
+
+
 def test_verify_files_reports_duplicates_not_moved_when_same_hash_at_multiple_paths(
     tmp_path: Path,
 ):
