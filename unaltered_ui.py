@@ -110,7 +110,8 @@ class UnalteredUI:
         self.progress_processed = 0
 
         self.common_vars: dict[str, tk.Variable]
-        self.verify_vars: dict[str, tk.Variable]  # verify-only (e.g. cross_root)
+        self.index_vars: dict[str, tk.Variable]   # index-only (e.g. index_log)
+        self.verify_vars: dict[str, tk.Variable]  # verify-only (e.g. cross_root, verify_log)
         self.output: scrolledtext.ScrolledText
         self.diff_tree: ttk.Treeview
         self.progress_bar: ttk.Progressbar
@@ -230,7 +231,6 @@ class UnalteredUI:
             "exclude_ext": tk.StringVar(value=""),
             "ignore_deleted": tk.BooleanVar(value=False),
             "workers": tk.StringVar(value="1"),
-            "log": tk.StringVar(value=""),
             "verbose": tk.BooleanVar(value=False),
         }
 
@@ -298,21 +298,6 @@ class UnalteredUI:
         ).grid(row=row, column=1, sticky="w", pady=(4, 0))
         row += 1
 
-        self._add_labeled_entry(
-            parent=parent,
-            row=row,
-            label_text="Log file (optional)",
-            variable=vars_map["log"],  # type: ignore[arg-type]
-            browse_command=lambda: self._browse_file_save(
-                vars_map["log"],  # type: ignore[arg-type]
-                title="Choose log path",
-                default_ext=".log",
-                file_types=[("Log files", "*.log"), ("All files", "*.*")],
-            ),
-            browse_label="Browse...",
-        )
-        row += 1
-
         ttk.Checkbutton(
             parent,
             text="Verbose logging",
@@ -351,24 +336,40 @@ class UnalteredUI:
         if not isinstance(data, dict):
             return
         bool_keys = {"ignore_deleted", "verbose", "cross_root"}
+
+        # Backwards compatibility: if an older single "log" key exists, map it
+        # to the new per-mode keys when explicit values are not present.
+        if "log" in data and "index_log" not in data and "verify_log" not in data:
+            legacy_log = data["log"]
+            data.setdefault("index_log", legacy_log)
+            data.setdefault("verify_log", legacy_log)
+
         for key, value in data.items():
+            target_var: Optional[tk.Variable] | None = None
             if key in self.common_vars:
-                v = self.common_vars[key]
-                if key in bool_keys:
-                    if isinstance(value, bool):
-                        v.set(value)
-                else:
-                    if isinstance(value, str):
-                        v.set(value)
+                target_var = self.common_vars[key]
+            elif hasattr(self, "index_vars") and key in self.index_vars:
+                target_var = self.index_vars[key]
             elif key in self.verify_vars:
-                v = self.verify_vars[key]
-                if key in bool_keys and isinstance(value, bool):
-                    v.set(value)
+                target_var = self.verify_vars[key]
+
+            if target_var is None:
+                continue
+
+            if key in bool_keys:
+                if isinstance(value, bool):
+                    target_var.set(value)
+            else:
+                if isinstance(value, str):
+                    target_var.set(value)
 
     def _save_defaults(self) -> None:
         """Save current form values to the config file as defaults."""
         data: dict[str, str | bool] = {}
         for key, v in self.common_vars.items():
+            val = v.get()
+            data[key] = val if isinstance(val, (str, bool)) else str(val)
+        for key, v in getattr(self, "index_vars", {}).items():
             val = v.get()
             data[key] = val if isinstance(val, (str, bool)) else str(val)
         for key, v in self.verify_vars.items():
@@ -386,23 +387,63 @@ class UnalteredUI:
             )
 
     def _build_index_tab(self, parent: ttk.Frame) -> None:
-        """Index tab: only the Run button (common settings are above)."""
+        """Index tab: index-specific settings plus Run button."""
+        self.index_vars = {"index_log": tk.StringVar(value="")}
+
+        settings_frame = ttk.Frame(parent)
+        settings_frame.pack(fill=tk.X, anchor="w")
+
+        self._add_labeled_entry(
+            parent=settings_frame,
+            row=0,
+            label_text="Index log file (optional)",
+            variable=self.index_vars["index_log"],  # type: ignore[arg-type]
+            browse_command=lambda: self._browse_file_save(
+                self.index_vars["index_log"],  # type: ignore[arg-type]
+                title="Choose index log path",
+                default_ext=".log",
+                file_types=[("Log files", "*.log"), ("All files", "*.*")],
+            ),
+            browse_label="Browse...",
+        )
+
         run_button = ttk.Button(
             parent,
             text="Run index",
             command=lambda: self._start_run("index"),
         )
-        run_button.pack(anchor="w")
+        run_button.pack(anchor="w", pady=(8, 0))
         self.run_buttons.append(run_button)
 
     def _build_verify_tab(self, parent: ttk.Frame) -> None:
-        """Verify tab: cross-root option and Run button (common settings are above)."""
-        self.verify_vars = {"cross_root": tk.BooleanVar(value=False)}
+        """Verify tab: verify-specific settings and Run button (common settings are above)."""
+        self.verify_vars = {
+            "cross_root": tk.BooleanVar(value=False),
+            "verify_log": tk.StringVar(value=""),
+        }
+
+        settings_frame = ttk.Frame(parent)
+        settings_frame.pack(fill=tk.X, anchor="w")
+
+        self._add_labeled_entry(
+            parent=settings_frame,
+            row=0,
+            label_text="Verify log file (optional)",
+            variable=self.verify_vars["verify_log"],  # type: ignore[arg-type]
+            browse_command=lambda: self._browse_file_save(
+                self.verify_vars["verify_log"],  # type: ignore[arg-type]
+                title="Choose verify log path",
+                default_ext=".log",
+                file_types=[("Log files", "*.log"), ("All files", "*.*")],
+            ),
+            browse_label="Browse...",
+        )
+
         ttk.Checkbutton(
             parent,
             text="Cross-root verify (hash-only, root can differ from index root)",
             variable=self.verify_vars["cross_root"],
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(anchor="w", pady=(8, 8))
         run_button = ttk.Button(
             parent,
             text="Run verify",
@@ -468,7 +509,16 @@ class UnalteredUI:
             )
             return
 
-        run_config = self._collect_common_config(self.common_vars)
+        # Combine common settings with mode-specific log file so index and verify
+        # can use different default log names.
+        if mode == "index":
+            values: dict[str, tk.Variable] = dict(self.common_vars)
+            values["log"] = self.index_vars["index_log"]
+        else:
+            values = dict(self.common_vars)
+            values["log"] = self.verify_vars["verify_log"]
+
+        run_config = self._collect_common_config(values)
         if run_config is None:
             return
 
